@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: boardgame-api
+    metrics_path: /metrics
+    static_configs:
+      # For local Compose; use a Kubernetes service-discovery configuration in GKE.
+      - targets: ["boardgame-api:8080"]

@@ -1,0 +1,6 @@
+apiVersion: 1
+providers:
+  - name: Board Game Dashboards
+    folder: DevSecOps
+    type: file
+    options: { path: /var/lib/grafana/dashboards }

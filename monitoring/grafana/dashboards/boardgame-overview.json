@@ -1,0 +1,10 @@
+{
+  "title": "Board Game API Overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [{
+    "title": "Requests per second", "type": "timeseries",
+    "targets": [{"expr": "sum(rate(boardgame_requests_total[5m]))", "legendFormat": "all requests"}],
+    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 0}
+  }]
+}

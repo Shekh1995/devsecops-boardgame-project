@@ -1,0 +1,2 @@
+# Run from a workstation with kubeaudit installed. It reports policy issues; fix findings before release.
+kubeaudit all -f deployment.yaml
