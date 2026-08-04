@@ -153,15 +153,18 @@ pipeline {
             return
           }
 
-          if (!env.DOCKER_USER?.trim() || !env.DOCKER_TOKEN?.trim()) {
-            echo 'Skipping image push because Docker Hub credentials were not provided.'
-            return
+          withCredentials([
+            usernamePassword(
+              credentialsId: 'dockerhub-credentials',
+              usernameVariable: 'DOCKER_USER',
+              passwordVariable: 'DOCKER_TOKEN'
+            )
+          ]) {
+            sh '''
+              echo "$DOCKER_TOKEN" | docker login -u "$DOCKER_USER" --password-stdin
+              docker push "$IMAGE"
+            '''
           }
-
-          sh '''
-            echo "$DOCKER_TOKEN" | docker login -u "$DOCKER_USER" --password-stdin
-            docker push $IMAGE
-          '''
         }
       }
     }
