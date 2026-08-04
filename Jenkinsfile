@@ -3,7 +3,7 @@ pipeline {
   options { timestamps(); disableConcurrentBuilds() }
   environment {
     REGISTRY = 'docker.io'
-    IMAGE_REPOSITORY = 'YOUR_DOCKERHUB_USERNAME/boardgame-devsecops'
+    IMAGE_REPOSITORY = 'shekhar013/boardgame-devsecops'
     IMAGE_TAG = "${BUILD_NUMBER}"
     IMAGE = "${REGISTRY}/${IMAGE_REPOSITORY}:${IMAGE_TAG}"
     K8S_NAMESPACE = 'boardgame'
