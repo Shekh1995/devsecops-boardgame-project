@@ -162,7 +162,10 @@ pipeline {
           ]) {
             sh '''
               echo "$DOCKER_TOKEN" | docker login -u "$DOCKER_USER" --password-stdin
-              docker push "$IMAGE"
+              if ! docker push "$IMAGE"; then
+                echo "Docker Hub push failed. Verify the Docker Hub token has write permissions for the repository and that the repository exists." >&2
+                exit 1
+              fi
             '''
           }
         }
