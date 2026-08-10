@@ -1,227 +1,290 @@
 pipeline {
-  agent any
 
-  options {
-    timestamps()
-    disableConcurrentBuilds()
-  }
-
-  environment {
-    REGISTRY = 'docker.io'
-    IMAGE_REPOSITORY = 'shekhar013/boardgame-devsecops'
-    IMAGE_TAG = "${BUILD_NUMBER}"
-    IMAGE = "${REGISTRY}/${IMAGE_REPOSITORY}:${IMAGE_TAG}"
-    K8S_NAMESPACE = 'boardgame'
-  }
-
-  stages {
-    stage('Checkout') {
-      steps {
-        checkout scm
-      }
+    agent {
+        label 'aws-agent'
     }
 
-    stage('Install and Test') {
-      steps {
-        script {
-          def pythonCmd = sh(script: '''
-            if command -v python3 >/dev/null 2>&1; then
-              echo python3
-            elif command -v python >/dev/null 2>&1; then
-              echo python
-            else
-              echo python-not-found >&2
-              exit 1
-            fi
-          ''', returnStdout: true).trim()
-
-          sh """
-            ${pythonCmd} -m venv .venv
-            . .venv/bin/activate
-            python -m pip install --upgrade pip
-            python -m pip install -r requirements-dev.txt
-            pytest --junitxml=test-results.xml --cov=. --cov-report=xml --cov-report=term-missing
-          """
-        }
-      }
+    environment {
+        IMAGE_NAME = 'boardgame-app'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        FULL_IMAGE = "${IMAGE_NAME}:${IMAGE_TAG}"
     }
 
-    stage('SonarQube Analysis') {
-      steps {
-        script {
-          def sonarAvailable = sh(script: 'command -v sonar-scanner >/dev/null 2>&1', returnStatus: true) == 0
-          def sonarHost = env.SONAR_HOST_URL?.trim()
-
-          if (!sonarAvailable || !sonarHost) {
-            echo 'Skipping SonarQube analysis because sonar-scanner or SONAR_HOST_URL is not configured.'
-            return
-          }
-
-          sh '''
-            . .venv/bin/activate
-
-            sonar-scanner \
-              -Dsonar.projectKey=boardgame-python \
-              -Dsonar.projectName=boardgame-python \
-              -Dsonar.sources=. \
-              -Dsonar.python.version=3 \
-              -Dsonar.python.coverage.reportPaths=coverage.xml \
-              -Dsonar.host.url=$SONAR_HOST_URL
-          '''
-        }
-      }
+    options {
+        timestamps()
+        skipDefaultCheckout(true)
     }
 
-    stage('Quality Gate') {
-      steps {
-        script {
-          def sonarHost = env.SONAR_HOST_URL?.trim()
-          if (!sonarHost) {
-            echo 'Skipping quality gate because SonarQube is not configured.'
-            return
-          }
+    stages {
 
-          try {
-            timeout(time: 5, unit: 'MINUTES') {
-              waitForQualityGate abortPipeline: true
+        stage('Checkout') {
+            steps {
+                echo '===== CHECKOUT ====='
+
+                checkout scm
+
+                sh '''
+                    echo "Repository:"
+                    git remote -v
+
+                    echo "Commit:"
+                    git rev-parse --short HEAD
+
+                    echo "Running on:"
+                    hostname
+
+                    echo "User:"
+                    whoami
+                '''
             }
-          } catch (Exception e) {
-            echo "Quality gate could not be evaluated: ${e.getMessage()}"
-          }
         }
-      }
+
+        stage('Install and Test') {
+            steps {
+                echo '===== INSTALL AND TEST ====='
+
+                sh '''
+                    set -e
+
+                    echo "Python:"
+                    python3 --version
+
+                    echo "Creating virtual environment..."
+                    rm -rf .venv
+                    python3 -m venv .venv
+
+                    echo "Installing pip..."
+                    .venv/bin/python -m pip install --upgrade pip
+
+                    if [ -f requirements.txt ]; then
+                        echo "Installing requirements..."
+                        .venv/bin/python -m pip install -r requirements.txt
+                    fi
+
+                    echo "Installing pytest..."
+                    .venv/bin/python -m pip install pytest
+
+                    echo "Running tests..."
+
+                    if find . -maxdepth 2 -type f \\( -name '*test*.py' -o -name 'test_*.py' \\) | grep -q .; then
+                        .venv/bin/python -m pytest -q --junitxml=test-results.xml
+                    else
+                        echo "No Python test files found."
+                        echo "Creating empty JUnit report."
+                        cat > test-results.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="boardgame-tests" tests="0" failures="0" errors="0" skipped="0"></testsuite>
+EOF
+                    fi
+                '''
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                echo '===== SONARQUBE ANALYSIS ====='
+
+                script {
+                    def scanner = tool 'sonar-scanner'
+
+                    withSonarQubeEnv('sonarqube') {
+                        sh """
+                            ${scanner}/bin/sonar-scanner
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                echo '===== SONARQUBE QUALITY GATE ====='
+
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Trivy Filesystem Scan') {
+            steps {
+                echo '===== TRIVY FILESYSTEM SCAN ====='
+
+                sh '''
+                    trivy fs \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 1 \
+                        --no-progress \
+                        .
+                '''
+            }
+        }
+
+        stage('Build Image') {
+            steps {
+                echo '===== DOCKER BUILD ====='
+
+                sh '''
+                    docker --version
+
+                    docker build \
+                        -t ${FULL_IMAGE} \
+                        .
+
+                    docker images | grep boardgame
+                '''
+            }
+        }
+
+        stage('Trivy Image Scan') {
+            steps {
+                echo '===== TRIVY IMAGE SCAN ====='
+
+                sh '''
+                    trivy image \
+                        --severity HIGH,CRITICAL \
+                        --exit-code 1 \
+                        --no-progress \
+                        ${FULL_IMAGE}
+                '''
+            }
+        }
+
+        stage('Push Image') {
+            steps {
+                echo '===== PUSH IMAGE ====='
+
+                /*
+                 * Jenkins credential ID:
+                 * dockerhub-credentials
+                 *
+                 * Replace DOCKERHUB_USERNAME with your Docker Hub
+                 * username or configure it as a Jenkins environment variable.
+                 */
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-credentials',
+                        usernameVariable: 'DOCKERHUB_USERNAME',
+                        passwordVariable: 'DOCKERHUB_PASSWORD'
+                    )
+                ]) {
+
+                    sh '''
+                        set -e
+
+                        echo "$DOCKERHUB_PASSWORD" | \
+                            docker login \
+                            -u "$DOCKERHUB_USERNAME" \
+                            --password-stdin
+
+                        docker tag \
+                            ${FULL_IMAGE} \
+                            ${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}
+
+                        docker tag \
+                            ${FULL_IMAGE} \
+                            ${DOCKERHUB_USERNAME}/${IMAGE_NAME}:latest
+
+                        docker push \
+                            ${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}
+
+                        docker push \
+                            ${DOCKERHUB_USERNAME}/${IMAGE_NAME}:latest
+
+                        docker logout
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to GKE') {
+            steps {
+                echo '===== DEPLOY TO GKE ====='
+
+                /*
+                 * This stage assumes that the AWS Jenkins agent
+                 * has gcloud installed and authenticated.
+                 *
+                 * Configure your GCP/GKE values below.
+                 */
+
+                sh '''
+                    gcloud --version
+
+                    gcloud container clusters get-credentials \
+                        ${GKE_CLUSTER} \
+                        --zone ${GKE_ZONE} \
+                        --project ${GCP_PROJECT}
+
+                    kubectl get nodes
+
+                    kubectl apply -f k8s/
+
+                    kubectl rollout status \
+                        deployment/boardgame \
+                        --timeout=180s
+                '''
+            }
+        }
     }
 
-    stage('Trivy Filesystem Scan') {
-      steps {
-        script {
-          if (sh(script: 'command -v trivy >/dev/null 2>&1', returnStatus: true) != 0) {
-            echo 'Skipping Trivy filesystem scan because trivy is not installed.'
-            return
-          }
+    post {
 
-          def trivyExitCode = sh(
-            script: 'trivy fs --severity HIGH,CRITICAL --exit-code 1 --no-progress .',
-            returnStatus: true
-          )
+        always {
 
-          if (trivyExitCode != 0) {
-            echo 'Trivy scan did not complete successfully. Continuing because the agent may lack a compatible Trivy/home-directory configuration.'
-          }
-        }
-      }
-    }
+            echo '===== TEST RESULTS ====='
 
-    stage('Build Image') {
-      steps {
-        script {
-          if (sh(script: 'command -v docker >/dev/null 2>&1', returnStatus: true) != 0) {
-            echo 'Skipping Docker image build because docker is not installed.'
-            return
-          }
-
-          sh 'docker build --pull -t $IMAGE .'
-        }
-      }
-    }
-
-    stage('Trivy Image Scan') {
-      steps {
-        script {
-          if (sh(script: 'command -v trivy >/dev/null 2>&1', returnStatus: true) != 0) {
-            echo 'Skipping Trivy image scan because trivy is not installed.'
-            return
-          }
-
-          def trivyExitCode = sh(
-            script: 'trivy image --severity HIGH,CRITICAL --exit-code 1 --no-progress $IMAGE',
-            returnStatus: true
-          )
-
-          if (trivyExitCode != 0) {
-            echo 'Trivy image scan did not complete successfully. Continuing because the agent may lack a compatible Trivy/home-directory configuration.'
-          }
-        }
-      }
-    }
-
-    stage('Push Image') {
-      steps {
-        script {
-          if (sh(script: 'command -v docker >/dev/null 2>&1', returnStatus: true) != 0) {
-            echo 'Skipping image push because docker is not installed.'
-            return
-          }
-
-          withCredentials([
-            usernamePassword(
-              credentialsId: 'dockerhub-credentials',
-              usernameVariable: 'DOCKER_USER',
-              passwordVariable: 'DOCKER_TOKEN'
+            junit(
+                allowEmptyResults: true,
+                testResults: 'test-results.xml'
             )
-          ]) {
-            sh '''
-              echo "$DOCKER_TOKEN" | docker login -u "$DOCKER_USER" --password-stdin
-              if ! docker push "$IMAGE"; then
-                echo "Docker Hub push failed. Verify the Docker Hub token has write permissions for the repository and that the repository exists." >&2
-                exit 1
-              fi
+
+            echo '===== CLEANING WORKSPACE ====='
+
+            cleanWs()
+        }
+
+        success {
+
+            echo '''
+            ========================================
+              DEVSECOPS PIPELINE SUCCESSFUL
+            ========================================
+
+              Checkout       : SUCCESS
+              Tests           : SUCCESS
+              SonarQube       : SUCCESS
+              Quality Gate    : SUCCESS
+              Trivy FS        : SUCCESS
+              Docker Build    : SUCCESS
+              Trivy Image     : SUCCESS
+              Docker Push     : SUCCESS
+              GKE Deployment  : SUCCESS
+
+            ========================================
             '''
-          }
         }
-      }
-    }
 
-    stage('Deploy to GKE') {
-      when {
-        expression {
-          return env.BRANCH_NAME == 'main' || env.BRANCH_NAME == 'master'
+        failure {
+
+            echo '''
+            ========================================
+              DEVSECOPS PIPELINE FAILED
+            ========================================
+
+              Check the failed stage above.
+
+            ========================================
+            '''
+
+            sh '''
+                echo "===== DOCKER STATUS ====="
+                docker ps -a || true
+
+                echo "===== DOCKER IMAGES ====="
+                docker images || true
+            '''
         }
-      }
-
-      steps {
-        script {
-          if (sh(script: 'command -v kubectl >/dev/null 2>&1', returnStatus: true) != 0) {
-            echo 'Skipping deployment because kubectl is not installed.'
-            return
-          }
-
-          def kubeconfigPath = env.KUBECONFIG_FILE?.trim()
-          if (!kubeconfigPath || sh(script: "test -f '${kubeconfigPath}'", returnStatus: true) != 0) {
-            echo 'Skipping deployment because a kubeconfig file was not provided.'
-            return
-          }
-
-          sh """
-            export KUBECONFIG='${kubeconfigPath}'
-
-            kubectl apply -f k8s/namespace.yaml
-
-            sed "s|IMAGE_PLACEHOLDER|$IMAGE|g" k8s/deployment.yaml | kubectl apply -f -
-
-            kubectl apply -f k8s/service.yaml
-
-            kubectl apply -f k8s/ingress.yaml
-
-            kubectl -n $K8S_NAMESPACE rollout status deployment/boardgame-api --timeout=180s
-          """
-        }
-      }
     }
-  }
-
-  post {
-    always {
-      junit allowEmptyResults: true, testResults: 'test-results.xml'
-      cleanWs()
-    }
-
-    success {
-      echo "Deployment succeeded: ${IMAGE}"
-    }
-
-    failure {
-      echo 'Pipeline failed. Check the stage logs and scan reports.'
-    }
-  }
 }
