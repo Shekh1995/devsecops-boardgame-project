@@ -17,11 +17,6 @@ pipeline {
 
     stages {
 
-        /*
-         * =========================================================
-         * 1. CHECKOUT
-         * =========================================================
-         */
         stage('Checkout') {
             steps {
                 echo '===== CHECKOUT ====='
@@ -29,96 +24,62 @@ pipeline {
                 checkout scm
 
                 sh '''
-                    echo "Repository:"
-                    git remote -v
-
-                    echo "Commit:"
+                    echo "Git commit:"
                     git rev-parse --short HEAD
 
-                    echo "Running on:"
+                    echo "Jenkins node:"
                     hostname
 
-                    echo "User:"
+                    echo "Jenkins user:"
                     whoami
                 '''
             }
         }
 
 
-        /*
-         * =========================================================
-         * 2. PYTHON TEST
-         * =========================================================
-         */
-        stage('Install and Test') {
+        stage('Python Test') {
             steps {
-                echo '===== INSTALL AND TEST ====='
+                echo '===== PYTHON TEST ====='
 
                 sh '''
                     set -e
 
-                    echo "Python version:"
+                    echo "Python:"
                     python3 --version
 
                     echo "Creating virtual environment..."
+
                     rm -rf .venv
+
                     python3 -m venv .venv
 
-                    echo "Upgrading pip..."
+                    echo "Installing dependencies..."
+
                     .venv/bin/python -m pip install --upgrade pip
 
-                    echo "Installing application requirements..."
-                    if [ -f requirements.txt ]; then
-                        .venv/bin/python -m pip install -r requirements.txt
-                    fi
+                    .venv/bin/python -m pip install -r requirements.txt
 
-                    echo "Installing pytest..."
-                    .venv/bin/python -m pip install pytest
+                    echo "Running pytest..."
 
-                    echo "Running tests..."
-
-                    if find . -maxdepth 2 -type f \
-                        \\( -name '*test*.py' -o -name 'test_*.py' \\) \
-                        | grep -q .; then
-
-                        .venv/bin/python -m pytest -q \
-                            --junitxml=test-results.xml
-
-                    else
-                        echo "No Python test files found."
-
-                        cat > test-results.xml <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="boardgame-tests"
-           tests="0"
-           failures="0"
-           errors="0"
-           skipped="0">
-</testsuite>
-EOF
-                    fi
+                    .venv/bin/python -m pytest -q \
+                        --junitxml=test-results.xml
                 '''
             }
         }
 
 
-        /*
-         * =========================================================
-         * 3. SONARQUBE
-         * =========================================================
-         */
         stage('SonarQube Analysis') {
             steps {
                 echo '===== SONARQUBE ANALYSIS ====='
 
                 script {
 
-                    def scanner = tool 'sonar-scanner'
+                    def scannerHome = tool 'sonar-scanner'
 
                     withSonarQubeEnv('sonarqube') {
 
                         sh """
-                            ${scanner}/bin/sonar-scanner
+                            ${scannerHome}/bin/sonar-scanner
                         """
                     }
                 }
@@ -126,12 +87,7 @@ EOF
         }
 
 
-        /*
-         * =========================================================
-         * 4. SONARQUBE QUALITY GATE
-         * =========================================================
-         */
-        stage('Quality Gate') {
+        stage('SonarQube Quality Gate') {
             steps {
                 echo '===== SONARQUBE QUALITY GATE ====='
 
@@ -143,16 +99,13 @@ EOF
         }
 
 
-        /*
-         * =========================================================
-         * 5. TRIVY FILESYSTEM SCAN
-         * =========================================================
-         */
         stage('Trivy Filesystem Scan') {
             steps {
                 echo '===== TRIVY FILESYSTEM SCAN ====='
 
                 sh '''
+                    set -e
+
                     trivy fs \
                         --severity HIGH,CRITICAL \
                         --exit-code 1 \
@@ -163,12 +116,7 @@ EOF
         }
 
 
-        /*
-         * =========================================================
-         * 6. DOCKER BUILD
-         * =========================================================
-         */
-        stage('Build Docker Image') {
+        stage('Docker Build') {
             steps {
                 echo '===== DOCKER BUILD ====='
 
@@ -177,25 +125,19 @@ EOF
 
                     docker --version
 
-                    echo "Building image:"
+                    echo "Building:"
                     echo "${FULL_IMAGE}"
 
                     docker build \
                         -t "${FULL_IMAGE}" \
                         .
 
-                    echo "Docker image created:"
                     docker images | grep boardgame
                 '''
             }
         }
 
 
-        /*
-         * =========================================================
-         * 7. TRIVY DOCKER IMAGE SCAN
-         * =========================================================
-         */
         stage('Trivy Image Scan') {
             steps {
                 echo '===== TRIVY IMAGE SCAN ====='
@@ -213,12 +155,7 @@ EOF
         }
 
 
-        /*
-         * =========================================================
-         * 8. PUSH TO DOCKER HUB
-         * =========================================================
-         */
-        stage('Push Image to Docker Hub') {
+        stage('Push to Docker Hub') {
             steps {
                 echo '===== DOCKER HUB PUSH ====='
 
@@ -233,12 +170,14 @@ EOF
                     sh '''
                         set -e
 
+                        echo "Logging into Docker Hub..."
+
                         echo "$DOCKERHUB_PASSWORD" | \
                             docker login \
                             --username "$DOCKERHUB_USERNAME" \
                             --password-stdin
 
-                        echo "Tagging image..."
+                        echo "Tagging Docker image..."
 
                         docker tag \
                             "${FULL_IMAGE}" \
@@ -265,14 +204,8 @@ EOF
         }
 
 
-        /*
-         * =========================================================
-         * 9. DEPLOY TO GKE
-         * =========================================================
-         */
         stage('Deploy to GKE') {
             steps {
-
                 echo '===== DEPLOY TO GKE ====='
 
                 withCredentials([
@@ -280,6 +213,7 @@ EOF
                         credentialsId: 'gke-kubeconfig',
                         variable: 'KUBECONFIG'
                     ),
+
                     usernamePassword(
                         credentialsId: 'dockerhub-credentials',
                         usernameVariable: 'DOCKERHUB_USERNAME',
@@ -290,21 +224,26 @@ EOF
                     sh '''
                         set -e
 
-                        echo "===== KUBECTL VERSION ====="
+                        echo "===== KUBECTL ====="
+
                         kubectl version --client
 
                         echo "===== GKE NODES ====="
+
                         kubectl get nodes
 
-                        echo "===== CREATE/UPDATE NAMESPACE ====="
+                        echo "===== NAMESPACE ====="
+
                         kubectl apply -f k8s/namespace.yaml
 
-                        echo "===== SETTING DOCKER IMAGE ====="
+                        echo "===== DOCKER IMAGE ====="
 
                         DOCKER_IMAGE="${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}"
 
-                        echo "Deploying image:"
+                        echo "Deploying:"
                         echo "${DOCKER_IMAGE}"
+
+                        echo "===== UPDATE DEPLOYMENT IMAGE ====="
 
                         sed -i \
                             "s|IMAGE_PLACEHOLDER|${DOCKER_IMAGE}|g" \
@@ -314,33 +253,27 @@ EOF
 
                         kubectl apply -f k8s/
 
-                        echo "===== KUBERNETES RESOURCES ====="
-
-                        kubectl get all -n boardgame
-
-                        echo "===== WAITING FOR ROLLOUT ====="
+                        echo "===== WAIT FOR DEPLOYMENT ====="
 
                         kubectl rollout status \
                             deployment/boardgame-api \
                             -n boardgame \
                             --timeout=180s
 
-                        echo "===== DEPLOYMENT STATUS ====="
+                        echo "===== DEPLOYMENT ====="
 
                         kubectl get deployment \
-                            boardgame-api \
                             -n boardgame
 
-                        echo "===== POD STATUS ====="
+                        echo "===== PODS ====="
 
                         kubectl get pods \
                             -n boardgame \
                             -o wide
 
-                        echo "===== SERVICE STATUS ====="
+                        echo "===== SERVICES ====="
 
-                        kubectl get service \
-                            boardgame-api \
+                        kubectl get services \
                             -n boardgame
 
                         echo "===== GKE DEPLOYMENT SUCCESSFUL ====="
@@ -351,69 +284,52 @@ EOF
     }
 
 
-    /*
-     * =============================================================
-     * POST ACTIONS
-     * =============================================================
-     */
     post {
 
         always {
 
-            echo '===== PUBLISHING TEST RESULTS ====='
+            echo '===== TEST RESULTS ====='
 
             junit(
                 allowEmptyResults: true,
                 testResults: 'test-results.xml'
             )
-
-            echo '===== CLEANING WORKSPACE ====='
-
-            cleanWs()
         }
 
 
         success {
 
             echo '''
-            ================================================
-              DEVSECOPS PIPELINE SUCCESSFUL
-            ================================================
+================================================
+       DEVSECOPS PIPELINE SUCCESS
+================================================
 
-              Checkout              : SUCCESS
-              Python Tests          : SUCCESS
-              SonarQube             : SUCCESS
-              Quality Gate          : SUCCESS
-              Trivy FS Scan         : SUCCESS
-              Docker Build          : SUCCESS
-              Trivy Image Scan      : SUCCESS
-              Docker Hub Push       : SUCCESS
-              GKE Deployment        : SUCCESS
+GitHub                  : SUCCESS
+Python Tests            : SUCCESS
+SonarQube               : SUCCESS
+Quality Gate            : SUCCESS
+Trivy FS Scan           : SUCCESS
+Docker Build            : SUCCESS
+Trivy Image Scan        : SUCCESS
+Docker Hub Push         : SUCCESS
+GKE Deployment          : SUCCESS
 
-            ================================================
-            '''
+================================================
+'''
         }
 
 
         failure {
 
             echo '''
-            ================================================
-              DEVSECOPS PIPELINE FAILED
-            ================================================
+================================================
+       DEVSECOPS PIPELINE FAILED
+================================================
 
-              Check the failed stage in Console Output.
+Check the failed stage in Console Output.
 
-            ================================================
-            '''
-
-            sh '''
-                echo "===== DOCKER STATUS ====="
-                docker ps -a || true
-
-                echo "===== DOCKER IMAGES ====="
-                docker images || true
-            '''
+================================================
+'''
         }
     }
 }
