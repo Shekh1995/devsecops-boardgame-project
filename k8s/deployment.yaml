@@ -13,25 +13,33 @@ spec:
       app: boardgame-api
 
   template:
+
     metadata:
       labels:
         app: boardgame-api
 
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+
     spec:
 
-      # Security context for the Pod
+      # Kubernetes restricted PodSecurity
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
         runAsGroup: 10001
         fsGroup: 10001
 
+        # IMPORTANT FIX
+        seccompProfile:
+          type: RuntimeDefault
+
       containers:
 
         - name: boardgame-api
 
-          # Jenkins replaces this value with:
-          # shekhar013/boardgame-app:<BUILD_NUMBER>
           image: IMAGE_PLACEHOLDER
 
           imagePullPolicy: Always
@@ -41,14 +49,15 @@ spec:
               containerPort: 8080
               protocol: TCP
 
-          # Container security
           securityContext:
             allowPrivilegeEscalation: false
+
             capabilities:
               drop:
                 - ALL
 
           resources:
+
             requests:
               cpu: 100m
               memory: 128Mi
@@ -57,7 +66,6 @@ spec:
               cpu: 500m
               memory: 256Mi
 
-          # Readiness probe
           readinessProbe:
             httpGet:
               path: /health
@@ -67,10 +75,8 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 3
-            successThreshold: 1
             failureThreshold: 6
 
-          # Liveness probe
           livenessProbe:
             httpGet:
               path: /health
@@ -80,5 +86,4 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 20
             timeoutSeconds: 3
-            successThreshold: 1
             failureThreshold: 5
