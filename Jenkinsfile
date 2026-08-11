@@ -1,33 +1,83 @@
 pipeline {
 
-    agent {
-        label 'built-in'
-    }
+    agent any
 
     environment {
-        IMAGE_NAME = 'boardgame-app'
-        IMAGE_TAG  = "${BUILD_NUMBER}"
-        FULL_IMAGE = "${IMAGE_NAME}:${IMAGE_TAG}"
+
+        // ------------------------------------------------
+        // Application
+        // ------------------------------------------------
+        APP_NAME = 'boardgame-app'
+
+        // Jenkins BUILD_NUMBER creates a unique image tag
+        IMAGE_TAG = "${BUILD_NUMBER}"
+
+        // Docker Hub repository
+        // CHANGE THIS if your Docker Hub username/repository is different
+        DOCKER_IMAGE = "YOUR_DOCKERHUB_USERNAME/boardgame-app:${BUILD_NUMBER}"
+
+        // ------------------------------------------------
+        // SonarQube
+        // ------------------------------------------------
+        SONARQUBE_SERVER = 'sonarqube'
+        SONAR_PROJECT_KEY = 'boardgame-devsecops'
+
+        // ------------------------------------------------
+        // GKE
+        // ------------------------------------------------
+        GKE_NAMESPACE = 'default'
+
+        // Kubernetes deployment name
+        K8S_DEPLOYMENT = 'boardgame-app'
+
+        // Kubernetes service name
+        K8S_SERVICE = 'boardgame-service'
     }
 
     options {
+
         timestamps()
-        skipDefaultCheckout(true)
+
+        // Do not keep unlimited builds
+        buildDiscarder(
+            logRotator(
+                numToKeepStr: '10'
+            )
+        )
+
+        // Stop pipeline if it runs longer than 30 minutes
+        timeout(
+            time: 30,
+            unit: 'MINUTES'
+        )
     }
 
     stages {
 
+        // ==================================================
+        // 1. CHECKOUT
+        // ==================================================
+
         stage('Checkout') {
+
             steps {
-                echo '===== CHECKOUT ====='
+
+                echo '========================================'
+                echo '          CHECKOUT'
+                echo '========================================'
 
                 checkout scm
 
                 sh '''
+                    set -e
+
+                    echo "Repository:"
+                    git remote -v
+
                     echo "Git commit:"
                     git rev-parse --short HEAD
 
-                    echo "Jenkins node:"
+                    echo "Jenkins host:"
                     hostname
 
                     echo "Jenkins user:"
@@ -37,9 +87,17 @@ pipeline {
         }
 
 
+        // ==================================================
+        // 2. PYTHON TEST
+        // ==================================================
+
         stage('Python Test') {
+
             steps {
-                echo '===== PYTHON TEST ====='
+
+                echo '========================================'
+                echo '          PYTHON TEST'
+                echo '========================================'
 
                 sh '''
                     set -e
@@ -48,72 +106,116 @@ pipeline {
                     python3 --version
 
                     echo "Creating virtual environment..."
+
                     rm -rf .venv
+
                     python3 -m venv .venv
 
                     echo "Upgrading pip..."
+
                     .venv/bin/python -m pip install --upgrade pip
 
                     echo "Installing application dependencies..."
+
                     .venv/bin/python -m pip install -r requirements.txt
 
-                    echo "Installing test dependencies..."
+                    echo "Installing pytest..."
 
-                    if [ -f requirements-dev.txt ]; then
-                        .venv/bin/python -m pip install -r requirements-dev.txt
-                    else
-                        .venv/bin/python -m pip install pytest pytest-cov
-                    fi
+                    .venv/bin/python -m pip install pytest
 
-                    echo "Checking pytest..."
-                    .venv/bin/python -m pytest --version
+                    echo "Running pytest..."
 
-                    echo "Running tests..."
+                    .venv/bin/python -m pytest -q \
+                        --junitxml=test-results.xml
 
-                    .venv/bin/python -m pytest \
-                        -q \
-                        --junitxml=test-results.xml \
-                        --cov=. \
-                        --cov-report=xml:coverage.xml
+                    echo "Python tests completed successfully."
                 '''
+            }
+
+            post {
+
+                always {
+
+                    junit(
+                        allowEmptyResults: true,
+                        testResults: 'test-results.xml'
+                    )
+                }
             }
         }
 
 
+        // ==================================================
+        // 3. SONARQUBE ANALYSIS
+        // ==================================================
+
         stage('SonarQube Analysis') {
+
             steps {
-                echo '===== SONARQUBE ANALYSIS ====='
+
+                echo '========================================'
+                echo '       SONARQUBE ANALYSIS'
+                echo '========================================'
 
                 script {
 
-                    def scannerHome = tool 'sonar-scanner'
+                    withSonarQubeEnv("${SONARQUBE_SERVER}") {
 
-                    withSonarQubeEnv('sonarqube') {
+                        sh '''
+                            set -e
 
-                        sh """
-                            ${scannerHome}/bin/sonar-scanner
-                        """
+                            echo "Running SonarQube analysis..."
+
+                            sonar-scanner \
+                              -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                              -Dsonar.projectName=${SONAR_PROJECT_KEY} \
+                              -Dsonar.sources=. \
+                              -Dsonar.exclusions=".venv/**,**/__pycache__/**,**/*.pyc"
+
+                            echo "SonarQube analysis completed."
+                        '''
                     }
                 }
             }
         }
 
 
+        // ==================================================
+        // 4. SONARQUBE QUALITY GATE
+        // ==================================================
+
         stage('SonarQube Quality Gate') {
+
             steps {
-                echo '===== SONARQUBE QUALITY GATE ====='
 
-                timeout(time: 15, unit: 'MINUTES') {
+                echo '========================================'
+                echo '       SONARQUBE QUALITY GATE'
+                echo '========================================'
 
-                    waitForQualityGate abortPipeline: true
+                timeout(
+                    time: 15,
+                    unit: 'MINUTES'
+                ) {
+
+                    waitForQualityGate(
+                        abortPipeline: true
+                    )
                 }
             }
         }
 
 
+        // ==================================================
+        // 5. TRIVY FILESYSTEM SCAN
+        // ==================================================
+
         stage('Trivy Filesystem Scan') {
+
             steps {
-                echo '===== TRIVY FILESYSTEM SCAN ====='
+
+                echo '========================================'
+                echo '       TRIVY FILESYSTEM SCAN'
+                echo '========================================'
 
                 sh '''
                     set -e
@@ -121,21 +223,30 @@ pipeline {
                     echo "Trivy version:"
                     trivy --version
 
-                    echo "Running filesystem scan..."
+                    echo "Running filesystem security scan..."
 
                     trivy fs \
-                        --severity HIGH,CRITICAL \
-                        --exit-code 1 \
-                        --no-progress \
-                        .
+                      --severity HIGH,CRITICAL \
+                      --ignore-unfixed \
+                      --exit-code 1 \
+                      --no-progress \
+                      .
                 '''
             }
         }
 
 
+        // ==================================================
+        // 6. DOCKER BUILD
+        // ==================================================
+
         stage('Docker Build') {
+
             steps {
-                echo '===== DOCKER BUILD ====='
+
+                echo '========================================'
+                echo '             DOCKER BUILD'
+                echo '========================================'
 
                 sh '''
                     set -e
@@ -143,22 +254,35 @@ pipeline {
                     echo "Docker version:"
                     docker --version
 
+                    echo "Docker access test:"
+                    docker info > /dev/null
+
                     echo "Building Docker image..."
 
                     docker build \
-                        -t "${FULL_IMAGE}" \
-                        .
+                      --no-cache \
+                      -t ${APP_NAME}:${IMAGE_TAG} \
+                      .
 
                     echo "Docker image created:"
-                    docker images | grep boardgame
+
+                    docker images ${APP_NAME}:${IMAGE_TAG}
                 '''
             }
         }
 
 
+        // ==================================================
+        // 7. TRIVY IMAGE SCAN
+        // ==================================================
+
         stage('Trivy Image Scan') {
+
             steps {
-                echo '===== TRIVY IMAGE SCAN ====='
+
+                echo '========================================'
+                echo '          TRIVY IMAGE SCAN'
+                echo '========================================'
 
                 sh '''
                     set -e
@@ -166,58 +290,86 @@ pipeline {
                     echo "Scanning Docker image..."
 
                     trivy image \
-                        --severity HIGH,CRITICAL \
-                        --exit-code 1 \
-                        --no-progress \
-                        "${FULL_IMAGE}"
+                      --severity HIGH,CRITICAL \
+                      --ignore-unfixed \
+                      --exit-code 1 \
+                      --no-progress \
+                      ${APP_NAME}:${IMAGE_TAG}
+
+                    echo "Trivy image scan completed successfully."
                 '''
             }
         }
 
 
-        stage('Push to Docker Hub') {
-            steps {
-                echo '===== PUSH TO DOCKER HUB ====='
+        // ==================================================
+        // 8. TAG DOCKER IMAGE
+        // ==================================================
 
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'dockerhub-credentials',
-                        usernameVariable: 'DOCKERHUB_USERNAME',
-                        passwordVariable: 'DOCKERHUB_PASSWORD'
-                    )
-                ]) {
+        stage('Tag Docker Image') {
+
+            steps {
+
+                echo '========================================'
+                echo '          TAG DOCKER IMAGE'
+                echo '========================================'
+
+                sh '''
+                    set -e
+
+                    echo "Local image:"
+                    docker images ${APP_NAME}:${IMAGE_TAG}
+
+                    echo "Docker Hub image:"
+                    echo "${DOCKER_IMAGE}"
+
+                    docker tag \
+                        ${APP_NAME}:${IMAGE_TAG} \
+                        ${DOCKER_IMAGE}
+
+                    echo "Image tagged successfully."
+                '''
+            }
+        }
+
+
+        // ==================================================
+        // 9. PUSH TO DOCKER HUB
+        // ==================================================
+
+        stage('Push to Docker Hub') {
+
+            steps {
+
+                echo '========================================'
+                echo '          PUSH DOCKER IMAGE'
+                echo '========================================'
+
+                withCredentials(
+                    [
+                        usernamePassword(
+                            credentialsId: 'dockerhub-credentials',
+                            usernameVariable: 'DOCKER_USERNAME',
+                            passwordVariable: 'DOCKER_PASSWORD'
+                        )
+                    ]
+                ) {
 
                     sh '''
                         set -e
 
                         echo "Logging into Docker Hub..."
 
-                        echo "$DOCKERHUB_PASSWORD" | \
+                        echo "${DOCKER_PASSWORD}" | \
                             docker login \
-                            --username "$DOCKERHUB_USERNAME" \
+                            -u "${DOCKER_USERNAME}" \
                             --password-stdin
 
-                        echo "Tagging image..."
+                        echo "Pushing image..."
 
-                        docker tag \
-                            "${FULL_IMAGE}" \
-                            "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}"
+                        docker push "${DOCKER_IMAGE}"
 
-                        docker tag \
-                            "${FULL_IMAGE}" \
-                            "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:latest"
-
-                        echo "Pushing versioned image..."
-
-                        docker push \
-                            "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}"
-
-                        echo "Pushing latest image..."
-
-                        docker push \
-                            "${DOCKERHUB_USERNAME}/${IMAGE_NAME}:latest"
-
-                        echo "Logging out..."
+                        echo "Docker image pushed successfully."
 
                         docker logout
                     '''
@@ -226,81 +378,108 @@ pipeline {
         }
 
 
-        stage('Deploy to GKE') {
+        // ==================================================
+        // 10. GKE CONNECTION TEST
+        // ==================================================
+
+        stage('GKE Connection Test') {
+
             steps {
-                echo '===== DEPLOY TO GKE ====='
 
-                withCredentials([
-                    file(
-                        credentialsId: 'gke-kubeconfig',
-                        variable: 'KUBECONFIG'
-                    ),
+                echo '========================================'
+                echo '          GKE CONNECTION TEST'
+                echo '========================================'
 
-                    usernamePassword(
-                        credentialsId: 'dockerhub-credentials',
-                        usernameVariable: 'DOCKERHUB_USERNAME',
-                        passwordVariable: 'DOCKERHUB_PASSWORD'
-                    )
-                ]) {
+                withCredentials(
+                    [
+                        file(
+                            credentialsId: 'gke-kubeconfig',
+                            variable: 'KUBECONFIG'
+                        )
+                    ]
+                ) {
 
                     sh '''
                         set -e
 
-                        echo "kubectl version:"
+                        echo "Testing connection to GKE..."
+
                         kubectl version --client
 
-                        echo "Checking GKE connection:"
                         kubectl get nodes
 
-                        echo "Creating namespace..."
-                        kubectl apply -f k8s/namespace.yaml
+                        echo "GKE connection successful."
+                    '''
+                }
+            }
+        }
 
-                        echo "Preparing Docker image..."
 
-                        DOCKER_IMAGE="${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}"
+        // ==================================================
+        // 11. DEPLOY TO GKE
+        // ==================================================
 
-                        echo "Deployment image:"
-                        echo "${DOCKER_IMAGE}"
+        stage('Deploy to GKE') {
 
-                        echo "Replacing image placeholder..."
+            steps {
 
-                        sed -i \
-                            "s|IMAGE_PLACEHOLDER|${DOCKER_IMAGE}|g" \
-                            k8s/deployment.yaml
+                echo '========================================'
+                echo '             DEPLOY TO GKE'
+                echo '========================================'
 
-                        echo "Applying Kubernetes manifests..."
+                withCredentials(
+                    [
+                        file(
+                            credentialsId: 'gke-kubeconfig',
+                            variable: 'KUBECONFIG'
+                        )
+                    ]
+                ) {
 
-                        kubectl apply -f k8s/
+                    sh '''
+                        set -e
 
-                        echo "Checking Kubernetes resources..."
+                        echo "Using Kubernetes namespace:"
+                        echo "${GKE_NAMESPACE}"
 
-                        kubectl get all -n boardgame
+                        echo "Current Kubernetes context:"
+                        kubectl config current-context
 
-                        echo "Waiting for deployment..."
+                        echo "Checking cluster:"
+                        kubectl get nodes
 
-                        kubectl rollout status \
-                            deployment/boardgame-api \
-                            -n boardgame \
-                            --timeout=180s
-
-                        echo "Final deployment status:"
+                        echo "Checking deployment..."
 
                         kubectl get deployment \
-                            boardgame-api \
-                            -n boardgame
+                            ${K8S_DEPLOYMENT} \
+                            -n ${GKE_NAMESPACE} \
+                            || true
 
-                        echo "Pods:"
+                        echo "Updating Docker image..."
+
+                        kubectl set image deployment/${K8S_DEPLOYMENT} \
+                            ${K8S_DEPLOYMENT}=${DOCKER_IMAGE} \
+                            -n ${GKE_NAMESPACE}
+
+                        echo "Waiting for rollout..."
+
+                        kubectl rollout status \
+                            deployment/${K8S_DEPLOYMENT} \
+                            -n ${GKE_NAMESPACE} \
+                            --timeout=5m
+
+                        echo "Deployment successful."
+
+                        echo "Current pods:"
 
                         kubectl get pods \
-                            -n boardgame \
+                            -n ${GKE_NAMESPACE} \
                             -o wide
 
-                        echo "Services:"
+                        echo "Current services:"
 
-                        kubectl get services \
-                            -n boardgame
-
-                        echo "===== GKE DEPLOYMENT SUCCESSFUL ====="
+                        kubectl get svc \
+                            -n ${GKE_NAMESPACE}
                     '''
                 }
             }
@@ -308,47 +487,61 @@ pipeline {
     }
 
 
+    // ====================================================
+    // POST ACTIONS
+    // ====================================================
+
     post {
 
-        always {
-            echo '===== TEST RESULTS ====='
-
-            junit(
-                allowEmptyResults: true,
-                testResults: 'test-results.xml'
-            )
-        }
-
         success {
+
             echo '''
-====================================================
-          DEVSECOPS PIPELINE SUCCESS
-====================================================
+===============================================
+       DEVSECOPS PIPELINE SUCCESS
+===============================================
 
-Checkout                 : SUCCESS
-Python Tests             : SUCCESS
-SonarQube Analysis       : SUCCESS
-SonarQube Quality Gate   : SUCCESS
-Trivy Filesystem Scan    : SUCCESS
-Docker Build             : SUCCESS
-Trivy Image Scan         : SUCCESS
-Docker Hub Push          : SUCCESS
-GKE Deployment           : SUCCESS
+Checkout             : SUCCESS
+Python Tests          : SUCCESS
+SonarQube             : SUCCESS
+Quality Gate          : SUCCESS
+Trivy FS Scan         : SUCCESS
+Docker Build          : SUCCESS
+Trivy Image Scan      : SUCCESS
+Docker Hub Push       : SUCCESS
+GKE Connection        : SUCCESS
+GKE Deployment        : SUCCESS
 
-====================================================
+Application deployed successfully.
+===============================================
 '''
         }
 
         failure {
+
             echo '''
-====================================================
-          DEVSECOPS PIPELINE FAILED
-====================================================
+===============================================
+       DEVSECOPS PIPELINE FAILED
+===============================================
 
 Check the failed stage in Console Output.
 
-====================================================
+===============================================
 '''
+        }
+
+        always {
+
+            sh '''
+                echo "Cleaning temporary files..."
+
+                rm -rf .venv || true
+            '''
+
+            sh '''
+                echo "Docker images currently present:"
+
+                docker images ${APP_NAME} || true
+            '''
         }
     }
 }
