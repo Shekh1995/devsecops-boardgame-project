@@ -6,32 +6,32 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get upgrade -y \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
+# Create non-root user
 RUN groupadd --gid 10001 appgroup \
-    && useradd --uid 10001 \
+    && useradd \
+       --uid 10001 \
        --gid 10001 \
        --no-create-home \
        --shell /usr/sbin/nologin \
        appuser
 
+# Install Python dependencies
 COPY requirements.txt .
 
-RUN python -m pip install --upgrade pip setuptools msgpack \
+RUN python -m pip install --upgrade pip setuptools \
     && python -m pip install --no-cache-dir -r requirements.txt
 
+# Copy application
 COPY --chown=10001:10001 . .
 
+# Run as numeric non-root UID
 USER 10001:10001
 
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s \
             --timeout=5s \
-            --start-period=15s \
+            --start-period=20s \
             --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')" || exit 1
 
