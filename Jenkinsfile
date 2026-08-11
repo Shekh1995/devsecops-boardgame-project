@@ -3,67 +3,45 @@ pipeline {
     agent any
 
     environment {
+        APP_NAME   = 'boardgame-app'
+        IMAGE_TAG  = "${BUILD_NUMBER}"
 
-        // ------------------------------------------------
-        // Application
-        // ------------------------------------------------
-        APP_NAME = 'boardgame-app'
+        // Kubernetes details from your repository
+        K8S_NAMESPACE = 'boardgame'
+        K8S_DEPLOYMENT = 'boardgame-api'
+        K8S_CONTAINER = 'boardgame-api'
 
-        // Jenkins BUILD_NUMBER creates a unique image tag
-        IMAGE_TAG = "${BUILD_NUMBER}"
-
-        // Docker Hub repository
-        // CHANGE THIS if your Docker Hub username/repository is different
-        DOCKER_IMAGE = "YOUR_DOCKERHUB_USERNAME/boardgame-app:${BUILD_NUMBER}"
-
-        // ------------------------------------------------
-        // SonarQube
-        // ------------------------------------------------
-        SONARQUBE_SERVER = 'sonarqube'
-        SONAR_PROJECT_KEY = 'boardgame-devsecops'
-
-        // ------------------------------------------------
-        // GKE
-        // ------------------------------------------------
-        GKE_NAMESPACE = 'default'
-
-        // Kubernetes deployment name
-        K8S_DEPLOYMENT = 'boardgame-app'
-
-        // Kubernetes service name
-        K8S_SERVICE = 'boardgame-service'
+        // Jenkins configuration names
+        SONAR_SERVER = 'sonarqube'
+        SONAR_SCANNER = 'sonar-scanner'
     }
 
     options {
-
         timestamps()
 
-        // Do not keep unlimited builds
+        timeout(
+            time: 30,
+            unit: 'MINUTES'
+        )
+
         buildDiscarder(
             logRotator(
                 numToKeepStr: '10'
             )
         )
-
-        // Stop pipeline if it runs longer than 30 minutes
-        timeout(
-            time: 30,
-            unit: 'MINUTES'
-        )
     }
 
     stages {
 
-        // ==================================================
+        // =========================================================
         // 1. CHECKOUT
-        // ==================================================
+        // =========================================================
 
         stage('Checkout') {
-
             steps {
 
                 echo '========================================'
-                echo '          CHECKOUT'
+                echo '              CHECKOUT'
                 echo '========================================'
 
                 checkout scm
@@ -74,29 +52,28 @@ pipeline {
                     echo "Repository:"
                     git remote -v
 
-                    echo "Git commit:"
+                    echo "Commit:"
                     git rev-parse --short HEAD
 
-                    echo "Jenkins host:"
+                    echo "Host:"
                     hostname
 
-                    echo "Jenkins user:"
+                    echo "User:"
                     whoami
                 '''
             }
         }
 
 
-        // ==================================================
+        // =========================================================
         // 2. PYTHON TEST
-        // ==================================================
+        // =========================================================
 
         stage('Python Test') {
-
             steps {
 
                 echo '========================================'
-                echo '          PYTHON TEST'
+                echo '            PYTHON TEST'
                 echo '========================================'
 
                 sh '''
@@ -117,15 +94,21 @@ pipeline {
 
                     echo "Installing application dependencies..."
 
-                    .venv/bin/python -m pip install -r requirements.txt
+                    .venv/bin/python -m pip install \
+                        -r requirements.txt
 
                     echo "Installing pytest..."
 
                     .venv/bin/python -m pip install pytest
 
-                    echo "Running pytest..."
+                    echo "Checking pytest..."
 
-                    .venv/bin/python -m pytest -q \
+                    .venv/bin/python -m pytest --version
+
+                    echo "Running tests..."
+
+                    .venv/bin/python -m pytest \
+                        -q \
                         --junitxml=test-results.xml
 
                     echo "Python tests completed successfully."
@@ -133,7 +116,6 @@ pipeline {
             }
 
             post {
-
                 always {
 
                     junit(
@@ -145,47 +127,55 @@ pipeline {
         }
 
 
-        // ==================================================
+        // =========================================================
         // 3. SONARQUBE ANALYSIS
-        // ==================================================
+        // =========================================================
 
         stage('SonarQube Analysis') {
-
             steps {
 
                 echo '========================================'
-                echo '       SONARQUBE ANALYSIS'
+                echo '         SONARQUBE ANALYSIS'
                 echo '========================================'
 
                 script {
 
-                    withSonarQubeEnv("${SONARQUBE_SERVER}") {
+                    // IMPORTANT:
+                    // Use Jenkins-managed SonarQube Scanner.
+                    // Do NOT call "sonar-scanner" directly.
 
-                        sh '''
+                    def scannerHome = tool "${SONAR_SCANNER}"
+
+                    withSonarQubeEnv("${SONAR_SERVER}") {
+
+                        sh """
                             set -e
+
+                            echo "SonarQube Scanner location:"
+                            echo "${scannerHome}"
+
+                            echo "SonarQube Scanner version:"
+
+                            ${scannerHome}/bin/sonar-scanner \
+                                --version
 
                             echo "Running SonarQube analysis..."
 
-                            sonar-scanner \
-                              -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
-                              -Dsonar.projectName=${SONAR_PROJECT_KEY} \
-                              -Dsonar.sources=. \
-                              -Dsonar.exclusions=".venv/**,**/__pycache__/**,**/*.pyc"
+                            ${scannerHome}/bin/sonar-scanner
 
                             echo "SonarQube analysis completed."
-                        '''
+                        """
                     }
                 }
             }
         }
 
 
-        // ==================================================
+        // =========================================================
         // 4. SONARQUBE QUALITY GATE
-        // ==================================================
+        // =========================================================
 
         stage('SonarQube Quality Gate') {
-
             steps {
 
                 echo '========================================'
@@ -205,12 +195,11 @@ pipeline {
         }
 
 
-        // ==================================================
+        // =========================================================
         // 5. TRIVY FILESYSTEM SCAN
-        // ==================================================
+        // =========================================================
 
         stage('Trivy Filesystem Scan') {
-
             steps {
 
                 echo '========================================'
@@ -221,27 +210,29 @@ pipeline {
                     set -e
 
                     echo "Trivy version:"
+
                     trivy --version
 
-                    echo "Running filesystem security scan..."
+                    echo "Running filesystem scan..."
 
                     trivy fs \
-                      --severity HIGH,CRITICAL \
-                      --ignore-unfixed \
-                      --exit-code 1 \
-                      --no-progress \
-                      .
+                        --severity HIGH,CRITICAL \
+                        --ignore-unfixed \
+                        --exit-code 1 \
+                        --no-progress \
+                        .
+
+                    echo "Trivy filesystem scan completed successfully."
                 '''
             }
         }
 
 
-        // ==================================================
+        // =========================================================
         // 6. DOCKER BUILD
-        // ==================================================
+        // =========================================================
 
         stage('Docker Build') {
-
             steps {
 
                 echo '========================================'
@@ -252,32 +243,36 @@ pipeline {
                     set -e
 
                     echo "Docker version:"
+
                     docker --version
 
-                    echo "Docker access test:"
+                    echo "Testing Docker access..."
+
                     docker info > /dev/null
 
-                    echo "Building Docker image..."
+                    echo "Building image:"
+
+                    echo "${APP_NAME}:${IMAGE_TAG}"
 
                     docker build \
-                      --no-cache \
-                      -t ${APP_NAME}:${IMAGE_TAG} \
-                      .
+                        --pull \
+                        --no-cache \
+                        -t "${APP_NAME}:${IMAGE_TAG}" \
+                        .
 
                     echo "Docker image created:"
 
-                    docker images ${APP_NAME}:${IMAGE_TAG}
+                    docker images "${APP_NAME}:${IMAGE_TAG}"
                 '''
             }
         }
 
 
-        // ==================================================
+        // =========================================================
         // 7. TRIVY IMAGE SCAN
-        // ==================================================
+        // =========================================================
 
         stage('Trivy Image Scan') {
-
             steps {
 
                 echo '========================================'
@@ -287,14 +282,16 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "Scanning Docker image..."
+                    echo "Scanning image:"
+
+                    echo "${APP_NAME}:${IMAGE_TAG}"
 
                     trivy image \
-                      --severity HIGH,CRITICAL \
-                      --ignore-unfixed \
-                      --exit-code 1 \
-                      --no-progress \
-                      ${APP_NAME}:${IMAGE_TAG}
+                        --severity HIGH,CRITICAL \
+                        --ignore-unfixed \
+                        --exit-code 1 \
+                        --no-progress \
+                        "${APP_NAME}:${IMAGE_TAG}"
 
                     echo "Trivy image scan completed successfully."
                 '''
@@ -302,55 +299,23 @@ pipeline {
         }
 
 
-        // ==================================================
-        // 8. TAG DOCKER IMAGE
-        // ==================================================
-
-        stage('Tag Docker Image') {
-
-            steps {
-
-                echo '========================================'
-                echo '          TAG DOCKER IMAGE'
-                echo '========================================'
-
-                sh '''
-                    set -e
-
-                    echo "Local image:"
-                    docker images ${APP_NAME}:${IMAGE_TAG}
-
-                    echo "Docker Hub image:"
-                    echo "${DOCKER_IMAGE}"
-
-                    docker tag \
-                        ${APP_NAME}:${IMAGE_TAG} \
-                        ${DOCKER_IMAGE}
-
-                    echo "Image tagged successfully."
-                '''
-            }
-        }
-
-
-        // ==================================================
-        // 9. PUSH TO DOCKER HUB
-        // ==================================================
+        // =========================================================
+        // 8. PUSH TO DOCKER HUB
+        // =========================================================
 
         stage('Push to Docker Hub') {
-
             steps {
 
                 echo '========================================'
-                echo '          PUSH DOCKER IMAGE'
+                echo '          DOCKER HUB PUSH'
                 echo '========================================'
 
                 withCredentials(
                     [
                         usernamePassword(
                             credentialsId: 'dockerhub-credentials',
-                            usernameVariable: 'DOCKER_USERNAME',
-                            passwordVariable: 'DOCKER_PASSWORD'
+                            usernameVariable: 'DOCKERHUB_USERNAME',
+                            passwordVariable: 'DOCKERHUB_PASSWORD'
                         )
                     ]
                 ) {
@@ -358,12 +323,23 @@ pipeline {
                     sh '''
                         set -e
 
+                        DOCKER_IMAGE="${DOCKERHUB_USERNAME}/${APP_NAME}:${IMAGE_TAG}"
+
+                        echo "Docker Hub image:"
+                        echo "${DOCKER_IMAGE}"
+
                         echo "Logging into Docker Hub..."
 
-                        echo "${DOCKER_PASSWORD}" | \
+                        echo "${DOCKERHUB_PASSWORD}" | \
                             docker login \
-                            -u "${DOCKER_USERNAME}" \
+                            --username "${DOCKERHUB_USERNAME}" \
                             --password-stdin
+
+                        echo "Tagging image..."
+
+                        docker tag \
+                            "${APP_NAME}:${IMAGE_TAG}" \
+                            "${DOCKER_IMAGE}"
 
                         echo "Pushing image..."
 
@@ -378,12 +354,11 @@ pipeline {
         }
 
 
-        // ==================================================
-        // 10. GKE CONNECTION TEST
-        // ==================================================
+        // =========================================================
+        // 9. GKE CONNECTION TEST
+        // =========================================================
 
         stage('GKE Connection Test') {
-
             steps {
 
                 echo '========================================'
@@ -402,9 +377,11 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "Testing connection to GKE..."
+                        echo "kubectl version:"
 
                         kubectl version --client
+
+                        echo "GKE nodes:"
 
                         kubectl get nodes
 
@@ -415,16 +392,15 @@ pipeline {
         }
 
 
-        // ==================================================
-        // 11. DEPLOY TO GKE
-        // ==================================================
+        // =========================================================
+        // 10. DEPLOY TO GKE
+        // =========================================================
 
         stage('Deploy to GKE') {
-
             steps {
 
                 echo '========================================'
-                echo '             DEPLOY TO GKE'
+                echo '            DEPLOY TO GKE'
                 echo '========================================'
 
                 withCredentials(
@@ -432,6 +408,12 @@ pipeline {
                         file(
                             credentialsId: 'gke-kubeconfig',
                             variable: 'KUBECONFIG'
+                        ),
+
+                        usernamePassword(
+                            credentialsId: 'dockerhub-credentials',
+                            usernameVariable: 'DOCKERHUB_USERNAME',
+                            passwordVariable: 'DOCKERHUB_PASSWORD'
                         )
                     ]
                 ) {
@@ -439,47 +421,66 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "Using Kubernetes namespace:"
-                        echo "${GKE_NAMESPACE}"
+                        DOCKER_IMAGE="${DOCKERHUB_USERNAME}/${APP_NAME}:${IMAGE_TAG}"
 
-                        echo "Current Kubernetes context:"
-                        kubectl config current-context
+                        echo "Docker image for Kubernetes:"
+                        echo "${DOCKER_IMAGE}"
 
-                        echo "Checking cluster:"
+                        echo "Checking GKE connection..."
+
                         kubectl get nodes
+
+                        echo "Creating/updating namespace..."
+
+                        kubectl apply \
+                            -f k8s/namespace.yaml
+
+                        echo "Preparing Kubernetes deployment..."
+
+                        sed -i \
+                            "s|IMAGE_PLACEHOLDER|${DOCKER_IMAGE}|g" \
+                            k8s/deployment.yaml
+
+                        echo "Applying Kubernetes manifests..."
+
+                        kubectl apply \
+                            -f k8s/
 
                         echo "Checking deployment..."
 
                         kubectl get deployment \
-                            ${K8S_DEPLOYMENT} \
-                            -n ${GKE_NAMESPACE} \
-                            || true
-
-                        echo "Updating Docker image..."
-
-                        kubectl set image deployment/${K8S_DEPLOYMENT} \
-                            ${K8S_DEPLOYMENT}=${DOCKER_IMAGE} \
-                            -n ${GKE_NAMESPACE}
+                            "${K8S_DEPLOYMENT}" \
+                            -n "${K8S_NAMESPACE}"
 
                         echo "Waiting for rollout..."
 
                         kubectl rollout status \
-                            deployment/${K8S_DEPLOYMENT} \
-                            -n ${GKE_NAMESPACE} \
-                            --timeout=5m
+                            deployment/"${K8S_DEPLOYMENT}" \
+                            -n "${K8S_NAMESPACE}" \
+                            --timeout=180s
 
                         echo "Deployment successful."
 
-                        echo "Current pods:"
+                        echo "Pods:"
 
                         kubectl get pods \
-                            -n ${GKE_NAMESPACE} \
+                            -n "${K8S_NAMESPACE}" \
                             -o wide
 
-                        echo "Current services:"
+                        echo "Services:"
 
-                        kubectl get svc \
-                            -n ${GKE_NAMESPACE}
+                        kubectl get services \
+                            -n "${K8S_NAMESPACE}"
+
+                        echo "Deployment details:"
+
+                        kubectl describe deployment \
+                            "${K8S_DEPLOYMENT}" \
+                            -n "${K8S_NAMESPACE}"
+
+                        echo "========================================"
+                        echo "       GKE DEPLOYMENT SUCCESSFUL"
+                        echo "========================================"
                     '''
                 }
             }
@@ -487,60 +488,63 @@ pipeline {
     }
 
 
-    // ====================================================
+    // =============================================================
     // POST ACTIONS
-    // ====================================================
+    // =============================================================
 
     post {
 
         success {
 
             echo '''
-===============================================
-       DEVSECOPS PIPELINE SUCCESS
-===============================================
+====================================================
+           DEVSECOPS PIPELINE SUCCESS
+====================================================
 
-Checkout             : SUCCESS
-Python Tests          : SUCCESS
-SonarQube             : SUCCESS
-Quality Gate          : SUCCESS
-Trivy FS Scan         : SUCCESS
-Docker Build          : SUCCESS
-Trivy Image Scan      : SUCCESS
-Docker Hub Push       : SUCCESS
-GKE Connection        : SUCCESS
-GKE Deployment        : SUCCESS
+Checkout                  : SUCCESS
+Python Tests              : SUCCESS
+SonarQube Analysis        : SUCCESS
+SonarQube Quality Gate    : SUCCESS
+Trivy Filesystem Scan     : SUCCESS
+Docker Build              : SUCCESS
+Trivy Image Scan          : SUCCESS
+Docker Hub Push           : SUCCESS
+GKE Connection             : SUCCESS
+GKE Deployment            : SUCCESS
 
-Application deployed successfully.
-===============================================
+====================================================
+        APPLICATION DEPLOYED TO GKE
+====================================================
 '''
         }
+
 
         failure {
 
             echo '''
-===============================================
-       DEVSECOPS PIPELINE FAILED
-===============================================
+====================================================
+           DEVSECOPS PIPELINE FAILED
+====================================================
 
-Check the failed stage in Console Output.
+Check the Console Output for the failed stage.
 
-===============================================
+====================================================
 '''
         }
 
+
         always {
 
-            sh '''
-                echo "Cleaning temporary files..."
+            echo 'Cleaning temporary Python environment...'
 
+            sh '''
                 rm -rf .venv || true
             '''
 
-            sh '''
-                echo "Docker images currently present:"
+            echo 'Docker images on Jenkins:'
 
-                docker images ${APP_NAME} || true
+            sh '''
+                docker images "${APP_NAME}" || true
             '''
         }
     }
