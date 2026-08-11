@@ -5,7 +5,7 @@ pipeline {
     environment {
 
         // ============================================================
-        // DOCKER HUB
+        // DOCKER
         // ============================================================
         DOCKER_IMAGE = "shekhar013/boardgame-app"
         FULL_IMAGE   = "shekhar013/boardgame-app:${BUILD_NUMBER}"
@@ -13,18 +13,16 @@ pipeline {
         // ============================================================
         // SONARQUBE
         // ============================================================
-        SONARQUBE_SERVER  = "sonarqube"
-        SONAR_PROJECT_KEY = "boardgame-devsecops"
+        SONARQUBE_SERVER = "sonarqube"
 
         // ============================================================
         // JENKINS CREDENTIALS
         // ============================================================
-        DOCKER_CREDENTIALS   = "dockerhub-credentials"
+        DOCKER_CREDENTIALS    = "dockerhub-credentials"
         KUBECONFIG_CREDENTIALS = "gke-kubeconfig"
 
         // ============================================================
-        // KUBERNETES
-        // These MUST match k8s/*.yaml
+        // GKE
         // ============================================================
         K8S_NAMESPACE  = "boardgame"
         K8S_DEPLOYMENT = "boardgame-api"
@@ -40,7 +38,7 @@ pipeline {
     stages {
 
         // ============================================================
-        // CHECKOUT
+        // 1. CHECKOUT
         // ============================================================
         stage('Checkout') {
 
@@ -61,10 +59,10 @@ pipeline {
                     echo "Commit:"
                     git rev-parse --short HEAD
 
-                    echo "Host:"
+                    echo "Jenkins host:"
                     hostname
 
-                    echo "User:"
+                    echo "Jenkins user:"
                     whoami
                 '''
             }
@@ -72,7 +70,7 @@ pipeline {
 
 
         // ============================================================
-        // PYTHON TEST
+        // 2. PYTHON TEST
         // ============================================================
         stage('Python Test') {
 
@@ -85,6 +83,7 @@ pipeline {
                 sh '''
                     set -e
 
+                    echo "Python version:"
                     python3 --version
 
                     echo "Creating virtual environment..."
@@ -127,7 +126,7 @@ pipeline {
 
 
         // ============================================================
-        // SONARQUBE ANALYSIS
+        // 3. SONARQUBE ANALYSIS
         // ============================================================
         stage('SonarQube Analysis') {
 
@@ -147,7 +146,7 @@ pipeline {
                     echo "SonarScanner path:"
                     echo "${scannerHome}"
 
-                    withSonarQubeEnv("${SONARQUBE_SERVER}") {
+                    withSonarQubeEnv('sonarqube') {
 
                         sh """
                             set -e
@@ -158,13 +157,9 @@ pipeline {
 
                             echo "Running SonarQube analysis..."
 
-                            ${scannerHome}/bin/sonar-scanner \
-                                -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
-                                -Dsonar.projectName=boardgame-devsecops \
-                                -Dsonar.sources=. \
-                                -Dsonar.exclusions=".venv/**,.git/**,**/__pycache__/**,**/*.pyc"
+                            ${scannerHome}/bin/sonar-scanner
 
-                            echo "SonarQube analysis completed."
+                            echo "SonarQube analysis completed successfully."
                         """
                     }
                 }
@@ -173,7 +168,7 @@ pipeline {
 
 
         // ============================================================
-        // SONARQUBE QUALITY GATE
+        // 4. SONARQUBE QUALITY GATE
         // ============================================================
         stage('SonarQube Quality Gate') {
 
@@ -191,7 +186,7 @@ pipeline {
                             abortPipeline: false
                         )
 
-                        echo "Quality Gate: ${qualityGate.status}"
+                        echo "Quality Gate Status: ${qualityGate.status}"
 
                         if (qualityGate.status == 'OK') {
 
@@ -199,7 +194,7 @@ pipeline {
 
                         } else {
 
-                            echo "WARNING: SonarQube Quality Gate = ${qualityGate.status}"
+                            echo "WARNING: SonarQube Quality Gate is ${qualityGate.status}"
 
                             echo "Continuing pipeline for lab deployment."
                         }
@@ -210,7 +205,7 @@ pipeline {
 
 
         // ============================================================
-        // TRIVY FILESYSTEM
+        // 5. TRIVY FILESYSTEM SCAN
         // ============================================================
         stage('Trivy Filesystem Scan') {
 
@@ -223,6 +218,8 @@ pipeline {
                 sh '''
                     set +e
 
+                    echo "Running Trivy filesystem scan..."
+
                     trivy fs \
                         --scanners vuln,secret \
                         --severity HIGH,CRITICAL \
@@ -231,13 +228,20 @@ pipeline {
                         --skip-dirs .git \
                         .
 
-                    RC=$?
+                    TRIVY_EXIT=$?
 
-                    echo "Trivy filesystem exit code: ${RC}"
+                    echo "Trivy filesystem exit code: ${TRIVY_EXIT}"
 
-                    if [ ${RC} -ne 0 ]; then
-                        echo "WARNING: HIGH/CRITICAL findings detected."
-                        echo "Continuing for lab deployment."
+                    if [ ${TRIVY_EXIT} -ne 0 ]; then
+
+                        echo "WARNING:"
+                        echo "HIGH/CRITICAL vulnerabilities detected."
+                        echo "Continuing pipeline for lab deployment."
+
+                    else
+
+                        echo "Trivy filesystem scan PASSED."
+
                     fi
 
                     exit 0
@@ -247,7 +251,7 @@ pipeline {
 
 
         // ============================================================
-        // DOCKER BUILD
+        // 6. DOCKER BUILD
         // ============================================================
         stage('Docker Build') {
 
@@ -263,7 +267,7 @@ pipeline {
                     echo "Docker version:"
                     docker --version
 
-                    echo "Building:"
+                    echo "Building image:"
                     echo "${FULL_IMAGE}"
 
                     docker build \
@@ -281,7 +285,7 @@ pipeline {
 
 
         // ============================================================
-        // TRIVY IMAGE
+        // 7. TRIVY IMAGE SCAN
         // ============================================================
         stage('Trivy Image Scan') {
 
@@ -294,7 +298,7 @@ pipeline {
                 sh '''
                     set +e
 
-                    echo "Scanning:"
+                    echo "Scanning image:"
                     echo "${FULL_IMAGE}"
 
                     trivy image \
@@ -303,13 +307,22 @@ pipeline {
                         --no-progress \
                         "${FULL_IMAGE}"
 
-                    RC=$?
+                    TRIVY_EXIT=$?
 
-                    echo "Trivy image exit code: ${RC}"
+                    echo "Trivy image exit code: ${TRIVY_EXIT}"
 
-                    if [ ${RC} -ne 0 ]; then
-                        echo "WARNING: HIGH/CRITICAL image vulnerabilities detected."
-                        echo "Continuing for lab deployment."
+                    if [ ${TRIVY_EXIT} -ne 0 ]; then
+
+                        echo ""
+                        echo "WARNING:"
+                        echo "HIGH/CRITICAL image vulnerabilities detected."
+                        echo "Continuing pipeline for lab deployment."
+                        echo ""
+
+                    else
+
+                        echo "Trivy image scan PASSED."
+
                     fi
 
                     exit 0
@@ -319,7 +332,7 @@ pipeline {
 
 
         // ============================================================
-        // DOCKER HUB PUSH
+        // 8. DOCKER HUB PUSH
         // ============================================================
         stage('Push to Docker Hub') {
 
@@ -340,11 +353,13 @@ pipeline {
                     sh '''
                         set -e
 
+                        echo "Logging into Docker Hub..."
+
                         echo "${DOCKER_PASSWORD}" | docker login \
                             --username "${DOCKER_USERNAME}" \
                             --password-stdin
 
-                        echo "Pushing:"
+                        echo "Pushing image:"
                         echo "${FULL_IMAGE}"
 
                         docker push "${FULL_IMAGE}"
@@ -359,7 +374,7 @@ pipeline {
 
 
         // ============================================================
-        // GKE CONNECTION
+        // 9. GKE CONNECTION TEST
         // ============================================================
         stage('GKE Connection Test') {
 
@@ -379,7 +394,7 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "kubectl:"
+                        echo "kubectl version:"
                         kubectl version --client
 
                         echo "GKE nodes:"
@@ -394,7 +409,7 @@ pipeline {
 
 
         // ============================================================
-        // DEPLOY TO GKE
+        // 10. DEPLOY TO GKE
         // ============================================================
         stage('Deploy to GKE') {
 
@@ -414,33 +429,53 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "Creating/updating namespace..."
+                        echo "Namespace:"
+                        echo "${K8S_NAMESPACE}"
+
+                        echo "Deployment:"
+                        echo "${K8S_DEPLOYMENT}"
+
+                        echo "Container:"
+                        echo "${K8S_CONTAINER}"
+
+                        echo "Docker image:"
+                        echo "${FULL_IMAGE}"
+
+
+                        echo "Applying namespace..."
 
                         kubectl apply \
                             -f k8s/namespace.yaml
 
-                        echo "Replacing image placeholder..."
+
+                        echo "Preparing deployment manifest..."
 
                         sed -i \
                             "s|IMAGE_PLACEHOLDER|${FULL_IMAGE}|g" \
                             k8s/deployment.yaml
 
-                        echo "Applying Kubernetes manifests..."
+
+                        echo "Applying Kubernetes deployment..."
 
                         kubectl apply \
                             -f k8s/deployment.yaml \
                             -f k8s/service.yaml \
                             -f k8s/ingress.yaml
 
-                        echo "Deployment:"
+
+                        echo "Checking deployment..."
+
                         kubectl get deployment \
                             "${K8S_DEPLOYMENT}" \
                             -n "${K8S_NAMESPACE}"
 
-                        echo "Pods:"
+
+                        echo "Checking pods..."
+
                         kubectl get pods \
                             -n "${K8S_NAMESPACE}" \
                             -o wide
+
 
                         echo "Waiting for rollout..."
 
@@ -451,24 +486,31 @@ pipeline {
                         then
 
                             echo "========================================"
-                            echo "        GKE ROLLOUT FAILED"
+                            echo "          ROLLOUT FAILED"
                             echo "========================================"
 
-                            echo "Deployment:"
+                            echo "Deployment description:"
+
                             kubectl describe deployment \
                                 "${K8S_DEPLOYMENT}" \
                                 -n "${K8S_NAMESPACE}" || true
 
+
                             echo "Pods:"
+
                             kubectl get pods \
                                 -n "${K8S_NAMESPACE}" \
                                 -o wide || true
 
+
                             echo "Pod description:"
+
                             kubectl describe pods \
                                 -n "${K8S_NAMESPACE}" || true
 
-                            echo "Events:"
+
+                            echo "Kubernetes events:"
+
                             kubectl get events \
                                 -n "${K8S_NAMESPACE}" \
                                 --sort-by=.lastTimestamp || true
@@ -476,16 +518,26 @@ pipeline {
                             exit 1
                         fi
 
+
                         echo "========================================"
                         echo "       GKE DEPLOYMENT SUCCESS"
                         echo "========================================"
+
+
+                        echo "Pods:"
 
                         kubectl get pods \
                             -n "${K8S_NAMESPACE}" \
                             -o wide
 
+
+                        echo "Services:"
+
                         kubectl get svc \
                             -n "${K8S_NAMESPACE}"
+
+
+                        echo "Ingress:"
 
                         kubectl get ingress \
                             -n "${K8S_NAMESPACE}" || true
@@ -497,7 +549,7 @@ pipeline {
 
 
     // ================================================================
-    // POST
+    // POST ACTIONS
     // ================================================================
     post {
 
@@ -519,15 +571,16 @@ pipeline {
            DEVSECOPS PIPELINE SUCCESS
 ====================================================
 
-Python Tests          : PASSED
-SonarQube Analysis    : COMPLETED
-SonarQube Gate        : CHECKED
-Trivy Filesystem      : COMPLETED
-Docker Build          : PASSED
-Trivy Image           : COMPLETED
-Docker Hub            : PASSED
-GKE Connection        : PASSED
-GKE Deployment        : PASSED
+Checkout             : PASSED
+Python Tests         : PASSED
+SonarQube Analysis   : PASSED
+Quality Gate         : CHECKED
+Trivy Filesystem     : COMPLETED
+Docker Build         : PASSED
+Trivy Image          : COMPLETED
+Docker Hub Push      : PASSED
+GKE Connection       : PASSED
+GKE Deployment       : PASSED
 
 ====================================================
 '''
